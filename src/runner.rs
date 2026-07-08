@@ -52,6 +52,8 @@ pub struct RunResult {
     pub ops: usize,
     pub sent: u64,
     pub dropped: u64,
+    /// Full recorded client-operation history (for shrinking / debugging).
+    pub history: Vec<Op>,
 }
 
 /// Run one full simulation for `seed`. Deterministic: same seed + config => same
@@ -141,6 +143,7 @@ pub fn run(seed: u64, cfg: &RunConfig) -> RunResult {
         ops: history.len(),
         sent: net.sent,
         dropped: net.dropped,
+        history,
     }
 }
 

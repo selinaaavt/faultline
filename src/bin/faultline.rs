@@ -10,6 +10,7 @@
 //! testing.
 
 use faultline::runner::{run, RunConfig};
+use faultline::shrink::shrink;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -46,6 +47,22 @@ fn main() {
             first_bug = Some(seed);
             println!("FOUND a violation at seed {seed} (after {checked} seeds)\n");
             report(&r);
+
+            // Shrink the failing history to its essential ops -- what makes the
+            // failure debuggable instead of a 400-op haystack.
+            let (minimal, mv) = shrink(&r.history);
+            println!(
+                "\nshrank failing history: {} ops -> {} essential ops",
+                r.history.len(),
+                minimal.len()
+            );
+            println!("minimal failing trace:");
+            for op in &minimal {
+                println!("    {op}");
+            }
+            if let Some(v) = mv {
+                println!("  => {}", v.detail);
+            }
             break;
         }
     }

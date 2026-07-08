@@ -13,4 +13,5 @@ pub mod checker;
 pub mod kv;
 pub mod net;
 pub mod runner;
+pub mod shrink;
 pub mod sim;

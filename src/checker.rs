@@ -28,6 +28,18 @@ pub enum Op {
     Read { value: Option<u64>, node: NodeId, seq: u64, tick: Tick },
 }
 
+impl std::fmt::Display for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::Write { value, seq, .. } => write!(f, "#{seq} WRITE {value}"),
+            Op::Read { value, node, seq, .. } => match value {
+                Some(v) => write!(f, "#{seq} READ={v} (node {node})"),
+                None => write!(f, "#{seq} READ=none (node {node})"),
+            },
+        }
+    }
+}
+
 /// A detected consistency violation, with enough detail to explain it.
 #[derive(Debug, Clone)]
 pub struct Violation {
