@@ -22,6 +22,14 @@ pub struct RunConfig {
     pub write_prob: f64,
     pub read_prob: f64,
     pub fault_prob: f64,
+    /// If true, all reads are served by the primary only. This is the *correct*
+    /// configuration: the primary always holds the latest acknowledged value, so
+    /// no read can go backwards in time. Contrast with the default (reads served
+    /// by any node), whose stale backups violate consistency. Running the tool
+    /// in this mode and finding zero violations across thousands of seeds is what
+    /// proves the checker doesn't just flag everything -- it distinguishes a
+    /// correct design from a buggy one.
+    pub read_from_primary_only: bool,
 }
 
 impl Default for RunConfig {
@@ -33,6 +41,7 @@ impl Default for RunConfig {
             write_prob: 0.15,
             read_prob: 0.15,
             fault_prob: 0.03,
+            read_from_primary_only: false,
         }
     }
 }
@@ -96,14 +105,16 @@ pub fn run(seed: u64, cfg: &RunConfig) -> RunResult {
             }
         }
 
-        // 3) Maybe issue a client read from a random (non-crashed) node.
-        if rng.chance(cfg.read_prob)
-            && let Some(idx) = rng.index(nodes.len())
-            && !nodes[idx].crashed
-        {
-            let observed = nodes[idx].read(key);
-            history.push(Op::Read { value: observed, node: idx, seq: op_seq, tick: sched.now() });
-            op_seq += 1;
+        // 3) Maybe issue a client read. In the correct config, reads go to the
+        //    primary (node 0); otherwise to a random node (which may be a stale
+        //    backup -- the source of the bug).
+        if rng.chance(cfg.read_prob) {
+            let idx = if cfg.read_from_primary_only { 0 } else { rng.index(nodes.len()).unwrap_or(0) };
+            if !nodes[idx].crashed {
+                let observed = nodes[idx].read(key);
+                history.push(Op::Read { value: observed, node: idx, seq: op_seq, tick: sched.now() });
+                op_seq += 1;
+            }
         }
 
         // 4) Maybe inject a fault.

@@ -13,10 +13,18 @@ use faultline::runner::{run, RunConfig};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let cfg = RunConfig::default();
+
+    // `--correct` runs the fixed design (reads from primary only) to show the
+    // tool finds NO violations on a correct system -- proving it isn't just
+    // flagging everything.
+    let correct = args.iter().any(|a| a == "--correct");
+    let cfg = RunConfig { read_from_primary_only: correct, ..RunConfig::default() };
+    if correct {
+        println!("[correct mode: reads served by primary only]\n");
+    }
 
     // Replay mode: a seed was given.
-    if let Some(seed) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
+    if let Some(seed) = args.iter().skip(1).find_map(|s| s.parse::<u64>().ok()) {
         println!("=== replaying seed {seed} ===");
         let r = run(seed, &cfg);
         report(&r);
