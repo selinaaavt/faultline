@@ -38,18 +38,24 @@ replays identically.
 ## The capstone: testing a from-scratch Raft
 
 The KV store above is the warm-up. faultline also drives a **from-scratch Raft
-consensus implementation** (leader election, log replication, the up-to-date
-vote restriction, the commit rule) under the same fault injection, checking
-Raft's two headline safety properties after every step:
+consensus implementation** (leader election with randomized timeouts, log
+replication, the up-to-date vote restriction, the commit rule) under the same
+fault injection, checking both **safety** and **liveness**:
 
-- **Election safety** - at most one leader per term.
-- **State-machine safety** - committed logs never diverge across nodes.
+- **Election safety** (safety) - at most one leader per term.
+- **State-machine safety** (safety) - committed logs never diverge across nodes.
+- **Liveness** - after a stabilization phase (faults stop, network heals, nodes
+  revive), the cluster must elect a leader and commit new entries. Liveness is
+  only checked here, not under continuous faults: FLP says consensus need not
+  progress while the network is adversarial, so requiring it then would be
+  wrong. The check has teeth - shorten the stabilization window and it correctly
+  reports failure to progress.
 
 ```
 $ cargo run --release --bin faultline -- --raft
 no safety violation in 2000 seeds -- Raft held up.
-  (the simulator did real work: 34,681 leader elections and 6,949 committed
-   commands across the seeds, all under active fault injection)
+  safety : PASS (4404 leader elections, 86,661 committed commands under faults)
+  liveness: 1997/2000 seeds made progress after stabilization (3 failed)
 ```
 
 Getting there was the whole point. Building the tester paid off immediately: it
