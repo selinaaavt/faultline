@@ -35,6 +35,43 @@ It found a real linearizability bug in a plausible replication design, cut a
 411-operation run down to the 2 operations that matter, and proved the failure
 replays identically.
 
+## The capstone: testing a from-scratch Raft
+
+The KV store above is the warm-up. faultline also drives a **from-scratch Raft
+consensus implementation** (leader election, log replication, the up-to-date
+vote restriction, the commit rule) under the same fault injection, checking
+Raft's two headline safety properties after every step:
+
+- **Election safety** - at most one leader per term.
+- **State-machine safety** - committed logs never diverge across nodes.
+
+```
+$ cargo run --release --bin faultline -- --raft
+no safety violation in 2000 seeds -- Raft held up.
+  (the simulator did real work: 34,681 leader elections and 6,949 committed
+   commands across the seeds, all under active fault injection)
+```
+
+Getting there was the whole point. Building the tester paid off immediately: it
+**caught three genuine safety bugs in my own Raft**, each pinned to a
+reproducible seed and a minimized trace:
+
+1. A follower committed past what an AppendEntries actually confirmed (capped
+   commit by its whole log length instead of the confirmed prefix).
+2. A leader counted *itself* toward a majority for an index it no longer held
+   after a log truncation.
+3. The subtle one (seed 1111): a follower reported its match index as its raw
+   log length rather than the prefix the RPC confirmed - so a follower with a
+   longer, divergent log from an old term told the leader it had replicated
+   entries it never received, letting the leader commit on a false majority and
+   producing two conflicting committed entries at one index.
+
+All three are the kind of bug that surfaces once in millions of real runs and
+never reproduces. Here they reproduce from a fixed seed every time. After the
+fixes, Raft holds across all 2000 seeds - provably safe under adversarial,
+deterministic fault injection. That is exactly what deterministic simulation
+testing is for.
+
 ## Why this is the interesting way to test distributed systems
 
 Distributed bugs hide in timing: a message arrives late, a node crashes at the
@@ -77,12 +114,15 @@ src/
     rng.rs         the single seeded PRNG (SplitMix64) - all randomness
     scheduler.rs   logical-time event queue - all execution ordering
   net.rs           simulated network: drop / delay / reorder / partition
-  kv.rs            system under test: primary-backup replicated KV
-  runner.rs        drives clients + faults, records an operation history
+  kv.rs            warm-up system under test: primary-backup replicated KV
+  runner.rs        drives KV clients + faults, records an operation history
   checker.rs       monotonic-read linearizability check over the history
   shrink.rs        delta-debugging: minimize a failing history
-  bin/faultline.rs search seeds, reproduce, shrink
-tests/             21 tests: determinism, bug-found, correct-passes, shrinking
+  raft.rs          capstone system under test: from-scratch Raft consensus
+  raft_runner.rs   drives Raft under faults; checks election + state-machine safety
+  bin/faultline.rs search seeds, reproduce, shrink; --raft for the Raft suite
+tests/             28 tests: sim core, KV bug-find + shrink, Raft mechanics +
+                   safety-across-seeds + determinism
 ```
 
 Key design decisions:
