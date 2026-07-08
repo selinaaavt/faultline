@@ -18,10 +18,15 @@ pub struct RaftConfig {
     pub n_nodes: usize,
     pub ticks: u64,
     pub net: NetConfig,
-    pub election_prob: f64, // chance each node checks for an election timeout per tick
     pub heartbeat_prob: f64,
     pub client_prob: f64,
     pub fault_prob: f64,
+    /// Ticks of a final "stabilization" phase during which NO new faults are
+    /// injected, the network is healed, and all nodes are alive. Liveness is
+    /// only checkable here: under continuous faults, FLP says consensus need not
+    /// progress, so we require progress only once the system stabilizes. Set to
+    /// 0 to disable the liveness phase.
+    pub stabilize_ticks: u64,
 }
 
 impl Default for RaftConfig {
@@ -30,10 +35,10 @@ impl Default for RaftConfig {
             n_nodes: 5,
             ticks: 3_000,
             net: NetConfig::default(),
-            election_prob: 0.02,
             heartbeat_prob: 0.3,
             client_prob: 0.1,
             fault_prob: 0.02,
+            stabilize_ticks: 2_000,
         }
     }
 }
@@ -50,6 +55,11 @@ pub struct RaftRunResult {
     pub violation: Option<SafetyViolation>,
     pub commands_committed: usize,
     pub leaders_elected: usize,
+    /// Liveness verdict for the stabilization phase: `Some(true)` if the cluster
+    /// elected a leader and advanced its commit index after faults stopped,
+    /// `Some(false)` if it failed to make progress (a liveness violation),
+    /// `None` if no stabilization phase was run.
+    pub live: Option<bool>,
 }
 
 /// One deterministic Raft simulation. Same seed + config => same result.
@@ -58,6 +68,16 @@ pub fn run(seed: u64, cfg: &RaftConfig) -> RaftRunResult {
     let mut sched: Scheduler<Deliver<RaftMsg>> = Scheduler::new();
     let mut net = Network::new(cfg.n_nodes, cfg.net.clone());
     let mut nodes: Vec<RaftNode> = (0..cfg.n_nodes).map(|i| RaftNode::new(i, cfg.n_nodes)).collect();
+    // Give each node a randomized election timeout (the standard Raft technique
+    // to avoid split-vote livelock). Two rules matter for progress: the timeout
+    // must be well above the network round-trip (so votes/heartbeats arrive
+    // before a node re-times-out), and it must be widely spread across nodes (so
+    // they don't all time out together and split the vote). max_delay is the
+    // per-hop latency, so we set timeouts to many round-trips, spread ~3x.
+    let rtt = cfg.net.max_delay.max(1);
+    for n in nodes.iter_mut() {
+        n.set_base_timeout(10 * rtt + rng.below(20 * rtt));
+    }
 
     // Track (term -> set of leaders seen) for election safety, and the
     // highest-committed log across the run for state-machine safety.
@@ -93,7 +113,8 @@ pub fn run(seed: u64, cfg: &RaftConfig) -> RaftRunResult {
             if nodes[id].crashed {
                 continue;
             }
-            if nodes[id].role != Role::Leader && rng.chance(cfg.election_prob) {
+            // Election timeout fires via each node's randomized countdown.
+            if nodes[id].tick_election_timer() {
                 let msgs = nodes[id].start_election();
                 for (dst, m) in msgs {
                     net.send(&mut sched, &mut rng, id, dst, m);
@@ -130,6 +151,66 @@ pub fn run(seed: u64, cfg: &RaftConfig) -> RaftRunResult {
         }
     }
 
+    // --- Liveness phase ---
+    // Only run if the chaos phase didn't already break safety. Heal the network,
+    // revive every node, stop injecting faults, and keep driving timers +
+    // client commands. A correct, stabilized Raft MUST eventually elect a leader
+    // and commit new entries. We record the commit high-water mark at the start
+    // of stabilization and require it to strictly advance by the end.
+    let mut live: Option<bool> = None;
+    if violation.is_none() && cfg.stabilize_ticks > 0 {
+        net.partition.heal();
+        for n in nodes.iter_mut() {
+            n.restart(); // revive any crashed node (warm restart keeps its log)
+        }
+        let commit_before = nodes.iter().map(|n| n.commit_index).max().unwrap_or(0);
+
+        for _ in 0..cfg.stabilize_ticks {
+            if let Some(ev) = sched.step() {
+                let Deliver { from, to, msg } = ev.payload;
+                if to < nodes.len() {
+                    let replies = nodes[to].handle(from, msg);
+                    for (dst, m) in replies {
+                        net.send(&mut sched, &mut rng, to, dst, m);
+                    }
+                }
+            }
+            #[allow(clippy::needless_range_loop)]
+            for id in 0..cfg.n_nodes {
+                if nodes[id].tick_election_timer() {
+                    let msgs = nodes[id].start_election();
+                    for (dst, m) in msgs {
+                        net.send(&mut sched, &mut rng, id, dst, m);
+                    }
+                }
+                if nodes[id].role == Role::Leader && rng.chance(cfg.heartbeat_prob) {
+                    let msgs = nodes[id].heartbeat();
+                    for (dst, m) in msgs {
+                        net.send(&mut sched, &mut rng, id, dst, m);
+                    }
+                }
+            }
+            if rng.chance(cfg.client_prob)
+                && let Some(id) = rng.index(cfg.n_nodes)
+                && nodes[id].role == Role::Leader
+            {
+                command_counter += 1;
+                nodes[id].client_command(command_counter);
+            }
+            // Safety must STILL hold during stabilization.
+            let now = sched.now();
+            if let Some(v) = check_safety(&nodes, &mut leaders_per_term, &mut committed_by_index, now) {
+                violation = Some(v);
+                break;
+            }
+        }
+
+        let commit_after = nodes.iter().map(|n| n.commit_index).max().unwrap_or(0);
+        let has_leader = nodes.iter().any(|n| n.role == Role::Leader);
+        // Liveness: a stabilized cluster elected a leader and made new progress.
+        live = Some(violation.is_none() && has_leader && commit_after > commit_before);
+    }
+
     // Report the maximum commit_index reached by any node: how far the cluster
     // actually made durable progress (0 means nothing ever committed).
     let commands_committed = nodes.iter().map(|n| n.commit_index).max().unwrap_or(0);
@@ -138,6 +219,7 @@ pub fn run(seed: u64, cfg: &RaftConfig) -> RaftRunResult {
         violation,
         commands_committed,
         leaders_elected,
+        live,
     }
 }
 

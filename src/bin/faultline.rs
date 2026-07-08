@@ -114,18 +114,25 @@ fn run_raft_mode() {
     println!(
         "faultline --raft: stress-testing a from-scratch Raft ({} nodes) under\n\
          partitions, crashes, restarts, and message loss across {max_seeds} seeds.\n\
-         checking: election safety (<=1 leader/term) + state-machine safety\n\
-         (committed logs never diverge).\n",
+         checking: SAFETY (<=1 leader/term; committed logs never diverge) and,\n\
+         after faults stop, LIVENESS (the cluster elects a leader and commits).\n",
         cfg.n_nodes
     );
 
     let mut total_committed = 0usize;
     let mut total_leaders = 0usize;
+    let mut live_ok = 0usize;
+    let mut live_fail = 0usize;
     let mut violated: Option<u64> = None;
     for seed in 0..max_seeds {
         let r = raft_run(seed, &cfg);
         total_committed += r.commands_committed;
         total_leaders += r.leaders_elected;
+        match r.live {
+            Some(true) => live_ok += 1,
+            Some(false) => live_fail += 1,
+            None => {}
+        }
         if let Some(v) = &r.violation {
             println!("SAFETY VIOLATION at seed {seed}: {}", v.kind);
             println!("  {}", v.detail);
@@ -139,14 +146,18 @@ fn run_raft_mode() {
         None => {
             println!("no safety violation in {max_seeds} seeds -- Raft held up.");
             println!(
-                "  (the simulator did real work: {} leader elections and {} committed \
-                 commands across the seeds, all under active fault injection)",
+                "  safety : PASS ({} leader elections, {} committed commands under faults)",
                 total_leaders, total_committed
             );
             println!(
-                "\nThis is the meaningful result: a correct consensus protocol survives\n\
-                 adversarial, deterministic fault injection -- and if a bug were\n\
-                 introduced, the same harness would surface a reproducible seed."
+                "  liveness: {}/{} seeds made progress after stabilization ({} failed)",
+                live_ok, max_seeds, live_fail
+            );
+            println!(
+                "\nThis is the meaningful result: a correct consensus protocol stays SAFE\n\
+                 under adversarial fault injection AND recovers LIVENESS once the network\n\
+                 heals -- and if a bug were introduced, the same harness would surface a\n\
+                 reproducible seed."
             );
         }
     }

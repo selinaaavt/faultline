@@ -153,3 +153,25 @@ fn raft_runs_are_deterministic() {
         assert_eq!(a.leaders_elected, b.leaders_elected, "seed {seed}");
     }
 }
+
+#[test]
+fn raft_recovers_liveness_after_stabilization() {
+    // After faults stop and the network heals, a correct cluster must elect a
+    // leader and commit new entries. Every seed should report live=true.
+    let cfg = RaftConfig::default();
+    for seed in 0..200 {
+        let r = raft_run(seed, &cfg);
+        // Only meaningful when safety held (it always does here).
+        assert!(r.violation.is_none(), "unexpected safety violation at seed {seed}");
+        assert_eq!(r.live, Some(true), "seed {seed} failed to recover liveness");
+    }
+}
+
+#[test]
+fn liveness_check_has_teeth() {
+    // A stabilization window too short to elect + commit must report live=false.
+    // If this passed as live=true, the liveness check would be meaningless.
+    let cfg = RaftConfig { stabilize_ticks: 3, ..RaftConfig::default() };
+    let failures = (0..50).filter(|&s| raft_run(s, &cfg).live == Some(false)).count();
+    assert!(failures >= 45, "liveness check should fail when there's no time to progress, got {failures}/50");
+}

@@ -82,6 +82,17 @@ pub struct RaftNode {
     pub leader_id: Option<NodeId>,
     pub crashed: bool,
 
+    /// Randomized election-timeout countdown (in ticks). Decrements each tick;
+    /// when it hits 0 a follower/candidate starts an election. Reset to
+    /// `base_timeout` whenever the node hears from a current leader or grants a
+    /// vote. Randomization (per-node `base_timeout`) is what breaks election
+    /// livelock -- if every node used the same timeout they'd all time out
+    /// together, split the vote, and repeat.
+    pub election_timer: u64,
+    /// This node's randomized election timeout, set once by the runner from the
+    /// seeded RNG. The timer resets to this on contact from a leader.
+    pub base_timeout: u64,
+
     // --- Candidate state ---
     votes_received: Vec<bool>,
 
@@ -102,6 +113,8 @@ impl RaftNode {
             commit_index: 0,
             leader_id: None,
             crashed: false,
+            election_timer: 0,
+            base_timeout: 10,
             votes_received: vec![false; n_nodes],
             next_index: vec![1; n_nodes],
             match_index: vec![0; n_nodes],
@@ -110,6 +123,25 @@ impl RaftNode {
 
     fn majority(&self) -> usize {
         self.n_nodes / 2 + 1
+    }
+
+    /// Set this node's randomized election timeout (from the runner's seeded
+    /// RNG) and arm the countdown. Called once at setup per node.
+    pub fn set_base_timeout(&mut self, ticks: u64) {
+        self.base_timeout = ticks.max(1);
+        self.election_timer = self.base_timeout;
+    }
+
+    /// Decrement the election timer; returns true if it just expired (the runner
+    /// should then call `start_election`). Leaders don't run an election timer.
+    pub fn tick_election_timer(&mut self) -> bool {
+        if self.role == Role::Leader || self.crashed {
+            return false;
+        }
+        if self.election_timer > 0 {
+            self.election_timer -= 1;
+        }
+        self.election_timer == 0
     }
 
     /// Last log index (0 = empty log) and its term.
@@ -156,6 +188,7 @@ impl RaftNode {
         self.leader_id = None;
         self.votes_received = vec![false; self.n_nodes];
         self.votes_received[self.id] = true; // vote for self
+        self.election_timer = self.base_timeout; // re-arm; retry if this election stalls
 
         let (last_log_index, last_log_term) = self.last_log();
         (0..self.n_nodes)
@@ -237,6 +270,9 @@ impl RaftNode {
                     if can_vote && up_to_date {
                         granted = true;
                         self.voted_for = Some(candidate);
+                        // Granting a vote resets our timer: we've endorsed a
+                        // candidate, so don't immediately start a rival election.
+                        self.election_timer = self.base_timeout;
                     }
                 }
                 vec![(from, RaftMsg::RequestVoteReply { term: self.current_term, granted })]
@@ -274,9 +310,12 @@ impl RaftNode {
                         },
                     )];
                 }
-                // Valid leader for our term: become/stay follower, note the leader.
+                // Valid leader for our term: become/stay follower, note the
+                // leader, and reset the election timer -- hearing from a live
+                // leader is exactly what should suppress a follower's election.
                 self.role = Role::Follower;
                 self.leader_id = Some(leader);
+                self.election_timer = self.base_timeout;
 
                 // Log-matching check: our log must contain prev_log_index with
                 // prev_log_term, or we reject so the leader backs up.
