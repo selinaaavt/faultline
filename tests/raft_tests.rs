@@ -1,0 +1,116 @@
+//! Unit tests for the Raft implementation's core mechanics: election, the
+//! up-to-date-log voting restriction, log matching, and the commit rule. These
+//! exercise the logic directly (no network) so failures point at the algorithm.
+
+use faultline::raft::{RaftMsg, RaftNode, Role};
+
+#[test]
+fn candidate_wins_with_majority_votes() {
+    let mut n = RaftNode::new(0, 3);
+    let reqs = n.start_election();
+    assert_eq!(n.role, Role::Candidate);
+    assert_eq!(reqs.len(), 2, "requests one vote per peer");
+    // One peer grants -> that's 2 of 3 (incl. self) -> majority -> leader.
+    n.handle(1, RaftMsg::RequestVoteReply { term: n.current_term, granted: true });
+    assert_eq!(n.role, Role::Leader);
+}
+
+#[test]
+fn candidate_stays_without_majority() {
+    let mut n = RaftNode::new(0, 5);
+    n.start_election();
+    n.handle(1, RaftMsg::RequestVoteReply { term: n.current_term, granted: true });
+    // 2 of 5 is not a majority.
+    assert_eq!(n.role, Role::Candidate);
+}
+
+#[test]
+fn higher_term_forces_step_down() {
+    let mut n = RaftNode::new(0, 3);
+    n.start_election(); // becomes candidate at term 1
+    n.handle(1, RaftMsg::RequestVoteReply { term: 1, granted: true }); // leader
+    assert_eq!(n.role, Role::Leader);
+    // A message from a higher term must make us step down.
+    n.handle(2, RaftMsg::AppendEntries {
+        term: 5, leader: 2, prev_log_index: 0, prev_log_term: 0,
+        entries: vec![], leader_commit: 0,
+    });
+    assert_eq!(n.role, Role::Follower);
+    assert_eq!(n.current_term, 5);
+}
+
+#[test]
+fn vote_denied_to_stale_log() {
+    // A voter with a longer/newer log must reject a candidate whose log is behind.
+    let mut voter = RaftNode::new(1, 3);
+    // Give the voter a log at term 2.
+    voter.handle(0, RaftMsg::AppendEntries {
+        term: 2, leader: 0, prev_log_index: 0, prev_log_term: 0,
+        entries: vec![
+            faultline::raft::LogEntry { term: 2, command: 10 },
+            faultline::raft::LogEntry { term: 2, command: 11 },
+        ],
+        leader_commit: 0,
+    });
+    // Candidate at a higher term but with an empty (stale) log.
+    let reply = voter.handle(2, RaftMsg::RequestVote {
+        term: 3, candidate: 2, last_log_index: 0, last_log_term: 0,
+    });
+    match reply.first().map(|(_, m)| m) {
+        Some(RaftMsg::RequestVoteReply { granted, .. }) => {
+            assert!(!granted, "must deny vote to a candidate with a less up-to-date log");
+        }
+        _ => panic!("expected a vote reply"),
+    }
+}
+
+#[test]
+fn append_entries_rejects_on_log_mismatch() {
+    let mut f = RaftNode::new(1, 3);
+    // Leader claims prev_log_index=5 which the empty follower doesn't have.
+    let reply = f.handle(0, RaftMsg::AppendEntries {
+        term: 1, leader: 0, prev_log_index: 5, prev_log_term: 1,
+        entries: vec![], leader_commit: 0,
+    });
+    match reply.first().map(|(_, m)| m) {
+        Some(RaftMsg::AppendEntriesReply { success, .. }) => {
+            assert!(!success, "log-matching check must reject the mismatch");
+        }
+        _ => panic!("expected an append reply"),
+    }
+}
+
+#[test]
+fn conflicting_entry_truncates_follower_log() {
+    let mut f = RaftNode::new(1, 3);
+    // First, accept two entries at term 1.
+    f.handle(0, RaftMsg::AppendEntries {
+        term: 1, leader: 0, prev_log_index: 0, prev_log_term: 0,
+        entries: vec![
+            faultline::raft::LogEntry { term: 1, command: 1 },
+            faultline::raft::LogEntry { term: 1, command: 2 },
+        ],
+        leader_commit: 0,
+    });
+    assert_eq!(f.log.len(), 2);
+    // Now a new leader (term 2) overwrites index 2 with a different-term entry.
+    f.handle(2, RaftMsg::AppendEntries {
+        term: 2, leader: 2, prev_log_index: 1, prev_log_term: 1,
+        entries: vec![faultline::raft::LogEntry { term: 2, command: 99 }],
+        leader_commit: 0,
+    });
+    assert_eq!(f.log.len(), 2, "conflicting suffix truncated, new entry appended");
+    assert_eq!(f.log[1].command, 99);
+    assert_eq!(f.log[1].term, 2);
+}
+
+#[test]
+fn leader_commits_replicated_current_term_entry() {
+    let mut leader = RaftNode::new(0, 3);
+    leader.start_election();
+    leader.handle(1, RaftMsg::RequestVoteReply { term: 1, granted: true }); // leader, term 1
+    assert!(leader.client_command(42));
+    // Two followers ack the entry (match_index 1) -> majority -> commit.
+    leader.handle(1, RaftMsg::AppendEntriesReply { term: 1, success: true, match_index: 1 });
+    assert_eq!(leader.commit_index, 1, "entry on a majority in current term must commit");
+}
