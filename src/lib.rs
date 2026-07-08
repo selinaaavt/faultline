@@ -9,4 +9,5 @@
 //! *exactly* by replaying that seed. This is how systems like FoundationDB and
 //! TigerBeetle test correctness under partial failure.
 
+pub mod net;
 pub mod sim;
