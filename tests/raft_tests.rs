@@ -114,3 +114,42 @@ fn leader_commits_replicated_current_term_entry() {
     leader.handle(1, RaftMsg::AppendEntriesReply { term: 1, success: true, match_index: 1 });
     assert_eq!(leader.commit_index, 1, "entry on a majority in current term must commit");
 }
+
+// --- Integration: Raft under the deterministic simulator with fault injection ---
+
+use faultline::raft_runner::{run as raft_run, RaftConfig};
+
+#[test]
+fn raft_holds_safety_across_many_seeds() {
+    // The headline property: correct Raft survives adversarial fault injection.
+    // No seed in this range may produce a safety violation.
+    let cfg = RaftConfig::default();
+    for seed in 0..300 {
+        let r = raft_run(seed, &cfg);
+        assert!(
+            r.violation.is_none(),
+            "seed {seed} produced a Raft safety violation: {:?}",
+            r.violation
+        );
+    }
+}
+
+#[test]
+fn raft_makes_real_progress() {
+    // A safe-but-idle Raft would be a meaningless test. Confirm commands actually
+    // commit under the fault load (across seeds, meaningful commit volume).
+    let cfg = RaftConfig::default();
+    let total: usize = (0..100).map(|s| raft_run(s, &cfg).commands_committed).sum();
+    assert!(total > 50, "expected real commit progress across seeds, got {total}");
+}
+
+#[test]
+fn raft_runs_are_deterministic() {
+    let cfg = RaftConfig::default();
+    for seed in [0u64, 1, 42, 1111] {
+        let a = raft_run(seed, &cfg);
+        let b = raft_run(seed, &cfg);
+        assert_eq!(a.commands_committed, b.commands_committed, "seed {seed}");
+        assert_eq!(a.leaders_elected, b.leaders_elected, "seed {seed}");
+    }
+}

@@ -309,18 +309,36 @@ impl RaftNode {
                         self.log.push(entry);
                     }
                 }
+                // `idx` is now the index of the last entry this RPC confirmed
+                // matches the leader (prev_log_index + entries.len()).
+                let last_new_index = idx;
 
-                // Advance commit index to min(leaderCommit, our last index).
+                // Advance commit index -- but cap it by the last entry THIS RPC
+                // confirmed, not our whole log length. Capping by log.len() is a
+                // real Raft safety bug: a heartbeat (no entries) carrying a high
+                // leader_commit would commit stale entries still in our log from
+                // a previous leader, which a later AppendEntries then truncates
+                // -- committing an entry that gets overwritten. This is the
+                // `min(leaderCommit, index of last new entry)` rule from the paper.
                 if leader_commit > self.commit_index {
-                    self.commit_index = leader_commit.min(self.log.len());
+                    self.commit_index = leader_commit.min(last_new_index);
                 }
 
                 vec![(
                     from,
                     RaftMsg::AppendEntriesReply {
+                        // Report the match index relative to what THIS RPC
+                        // confirmed (prev_log_index + entries.len()), NOT our raw
+                        // log length. Reporting log.len() is a real safety bug: a
+                        // follower with a longer, *divergent* log from an old term
+                        // would tell the leader it had replicated entries it never
+                        // received, letting the leader count it toward a majority
+                        // and commit an entry that follower doesn't actually hold
+                        // -- producing two conflicting committed entries at one
+                        // index (the seed-1111 violation this simulator caught).
                         term: self.current_term,
                         success: true,
-                        match_index: self.log.len(),
+                        match_index: last_new_index,
                     },
                 )]
             }
@@ -359,15 +377,23 @@ impl RaftNode {
     /// Leader commit rule: an entry is committed once it's on a majority AND is
     /// from the current term. Advance commit_index to the highest such index.
     fn advance_commit(&mut self) {
+        // Keep the leader's own matchIndex equal to its log length, so the
+        // majority count is correct. Without this the leader counted "self"
+        // (via the old `count = 1`) toward an index it might not actually hold
+        // after a log truncation -- committing an entry no majority truly has.
+        // That was a genuine safety bug the simulator surfaced at seed 1111.
+        self.match_index[self.id] = self.log.len();
+
         for idx in (self.commit_index + 1..=self.log.len()).rev() {
             // Only commit entries from the current term (the Raft safety rule
             // that prevents committing a stale entry via count alone).
             if self.log_term_at(idx) != self.current_term {
                 continue;
             }
-            let mut count = 1; // self
+            // Count every node (including self) whose matchIndex reaches idx.
+            let mut count = 0;
             for p in 0..self.n_nodes {
-                if p != self.id && self.match_index[p] >= idx {
+                if self.match_index[p] >= idx {
                     count += 1;
                 }
             }

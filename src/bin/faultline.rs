@@ -9,11 +9,33 @@
 //! reproduces identically -- the core promise of deterministic simulation
 //! testing.
 
+use faultline::raft_runner::{run as raft_run, RaftConfig};
 use faultline::runner::{run, RunConfig};
 use faultline::shrink::shrink;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // `--raft` runs the Raft consensus system under test instead of the KV
+    // store: search seeds for a safety violation, reporting that correct Raft
+    // holds under fault injection (or a caught violation if one exists).
+    if args.iter().any(|a| a == "--raft") {
+        // Optional explicit seed after --raft replays just that one seed.
+        let seed = args.iter().skip(1).find_map(|s| s.parse::<u64>().ok());
+        match seed {
+            Some(s) => {
+                let r = raft_run(s, &RaftConfig::default());
+                println!("raft seed {s}: committed={} leaders={} violation={:?}",
+                    r.commands_committed, r.leaders_elected,
+                    r.violation.as_ref().map(|v| &v.kind));
+                if let Some(v) = &r.violation {
+                    println!("  {}", v.detail);
+                }
+            }
+            None => run_raft_mode(),
+        }
+        return;
+    }
 
     // `--correct` runs the fixed design (reads from primary only) to show the
     // tool finds NO violations on a correct system -- proving it isn't just
@@ -83,6 +105,50 @@ fn main() {
             );
         }
         None => println!("no violation found in {checked} seeds (system held up)"),
+    }
+}
+
+fn run_raft_mode() {
+    let cfg = RaftConfig::default();
+    let max_seeds = 2000;
+    println!(
+        "faultline --raft: stress-testing a from-scratch Raft ({} nodes) under\n\
+         partitions, crashes, restarts, and message loss across {max_seeds} seeds.\n\
+         checking: election safety (<=1 leader/term) + state-machine safety\n\
+         (committed logs never diverge).\n",
+        cfg.n_nodes
+    );
+
+    let mut total_committed = 0usize;
+    let mut total_leaders = 0usize;
+    let mut violated: Option<u64> = None;
+    for seed in 0..max_seeds {
+        let r = raft_run(seed, &cfg);
+        total_committed += r.commands_committed;
+        total_leaders += r.leaders_elected;
+        if let Some(v) = &r.violation {
+            println!("SAFETY VIOLATION at seed {seed}: {}", v.kind);
+            println!("  {}", v.detail);
+            violated = Some(seed);
+            break;
+        }
+    }
+
+    match violated {
+        Some(_) => {}
+        None => {
+            println!("no safety violation in {max_seeds} seeds -- Raft held up.");
+            println!(
+                "  (the simulator did real work: {} leader elections and {} committed \
+                 commands across the seeds, all under active fault injection)",
+                total_leaders, total_committed
+            );
+            println!(
+                "\nThis is the meaningful result: a correct consensus protocol survives\n\
+                 adversarial, deterministic fault injection -- and if a bug were\n\
+                 introduced, the same harness would surface a reproducible seed."
+            );
+        }
     }
 }
 
