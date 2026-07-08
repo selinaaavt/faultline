@@ -175,3 +175,35 @@ fn liveness_check_has_teeth() {
     let failures = (0..50).filter(|&s| raft_run(s, &cfg).live == Some(false)).count();
     assert!(failures >= 45, "liveness check should fail when there's no time to progress, got {failures}/50");
 }
+
+#[test]
+fn injected_bug_is_caught_but_fixed_version_is_safe() {
+    // Mutation test: with the match-index bug reintroduced, the checker must find
+    // a safety violation (proving it has teeth); with the bug fixed (inject_bug
+    // = false, the default), the same churn-heavy profile stays safe.
+    use faultline::net::NetConfig;
+
+    let churn = |inject_bug| RaftConfig {
+        n_nodes: 5,
+        ticks: 6000,
+        net: NetConfig { drop_prob: 0.1, min_delay: 1, max_delay: 20 },
+        fault_prob: 0.06,
+        stabilize_ticks: 0,
+        inject_bug,
+        ..RaftConfig::default()
+    };
+
+    // Buggy: some seed in a modest range must expose a violation.
+    let buggy = churn(true);
+    let caught = (0..1500).any(|s| raft_run(s, &buggy).violation.is_some());
+    assert!(caught, "the reintroduced bug must be caught by the checker");
+
+    // Fixed: the SAME profile must stay safe across the same range.
+    let fixed = churn(false);
+    for s in 0..1500 {
+        assert!(
+            raft_run(s, &fixed).violation.is_none(),
+            "fixed protocol must hold safety under the churn profile (seed {s})"
+        );
+    }
+}

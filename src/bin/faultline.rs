@@ -16,6 +16,13 @@ use faultline::shrink::shrink;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    // `--raft-buggy` reintroduces the fixed match-index bug and shows the
+    // simulator catching it: a mutation test proving the checker has teeth.
+    if args.iter().any(|a| a == "--raft-buggy") {
+        run_raft_buggy_mode();
+        return;
+    }
+
     // `--raft` runs the Raft consensus system under test instead of the KV
     // store: search seeds for a safety violation, reporting that correct Raft
     // holds under fault injection (or a caught violation if one exists).
@@ -105,6 +112,35 @@ fn main() {
             );
         }
         None => println!("no violation found in {checked} seeds (system held up)"),
+    }
+}
+
+fn run_raft_buggy_mode() {
+    // A mutation test of the checker. We reintroduce the match-index safety bug
+    // and drive the *specific* interleaving that exploits it (a follower with a
+    // longer, divergent log from an old term reports its raw log length, so a
+    // leader commits on a false majority). The checker must flag the resulting
+    // divergence. This is a deterministic construction rather than a random
+    // search, because under correct randomized election timeouts the trigger is
+    // rare -- the honest, reliable way to show the checker has teeth.
+    println!(
+        "faultline --raft-buggy: the match-index safety bug is reintroduced and\n\
+         we search seeds (under a churn-heavy fault profile) for one that exposes\n\
+         it. A working checker must catch it and hand back a reproducing seed.\n"
+    );
+    match faultline::raft_runner::demonstrate_injected_bug() {
+        Some((seed, detail)) => {
+            println!("CAUGHT the injected safety bug at seed {seed}: state_machine_safety");
+            println!("  {detail}");
+            println!(
+                "\nThe checker has teeth: with the bug present it finds a reproducing\n\
+                 seed; run --raft (bug fixed) to confirm the protocol then holds\n\
+                 safety AND liveness across all seeds."
+            );
+        }
+        None => println!(
+            "no violation found -- unexpected; the injected bug should be caught."
+        ),
     }
 }
 

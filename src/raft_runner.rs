@@ -27,6 +27,9 @@ pub struct RaftConfig {
     /// progress, so we require progress only once the system stabilizes. Set to
     /// 0 to disable the liveness phase.
     pub stabilize_ticks: u64,
+    /// Reintroduce the fixed match-index safety bug in every node, to
+    /// demonstrate that the simulator catches it (a mutation test of the checker).
+    pub inject_bug: bool,
 }
 
 impl Default for RaftConfig {
@@ -39,6 +42,7 @@ impl Default for RaftConfig {
             client_prob: 0.1,
             fault_prob: 0.02,
             stabilize_ticks: 2_000,
+            inject_bug: false,
         }
     }
 }
@@ -77,6 +81,7 @@ pub fn run(seed: u64, cfg: &RaftConfig) -> RaftRunResult {
     let rtt = cfg.net.max_delay.max(1);
     for n in nodes.iter_mut() {
         n.set_base_timeout(10 * rtt + rng.below(20 * rtt));
+        n.inject_match_index_bug = cfg.inject_bug;
     }
 
     // Track (term -> set of leaders seen) for election safety, and the
@@ -317,4 +322,27 @@ fn inject_fault(rng: &mut Rng, net: &mut Network, nodes: &mut [RaftNode], n: usi
             }
         }
     }
+}
+/// Mutation test: reintroduce the fixed match-index safety bug and search for a
+/// seed that exposes it, proving the checker has teeth. Uses a churn-inducing
+/// config (short network latency -> frequent elections and divergent logs),
+/// which is what surfaces this timing-dependent bug. Returns `Some((seed,
+/// detail))` for the first violating seed, or `None` if none found.
+pub fn demonstrate_injected_bug() -> Option<(u64, String)> {
+    let cfg = RaftConfig {
+        n_nodes: 5,
+        ticks: 6000,
+        net: NetConfig { drop_prob: 0.1, min_delay: 1, max_delay: 20 },
+        fault_prob: 0.06,
+        stabilize_ticks: 0,
+        inject_bug: true,
+        ..RaftConfig::default()
+    };
+    for seed in 0..5000 {
+        let r = run(seed, &cfg);
+        if let Some(v) = r.violation {
+            return Some((seed, v.detail));
+        }
+    }
+    None
 }

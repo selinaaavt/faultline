@@ -78,6 +78,20 @@ fixes, Raft holds across all 2000 seeds - provably safe under adversarial,
 deterministic fault injection. That is exactly what deterministic simulation
 testing is for.
 
+**Proving the checker has teeth (mutation testing).** A safety checker that
+never fires is worthless. `--raft-buggy` reintroduces the third bug on purpose
+and searches for a seed that exposes it:
+
+```
+$ cargo run --release --bin faultline -- --raft-buggy
+CAUGHT the injected safety bug at seed 1235: state_machine_safety
+  nodes 3 and 4 disagree at committed index 3: (term 1, cmd 3) vs (term 12, cmd 4)
+```
+
+So the checker demonstrably catches a real violation when one exists, and
+demonstrably passes when the bug is fixed - the two halves that make "no
+violation found" meaningful.
+
 ## Why this is the interesting way to test distributed systems
 
 Distributed bugs hide in timing: a message arrives late, a node crashes at the

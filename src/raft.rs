@@ -93,6 +93,13 @@ pub struct RaftNode {
     /// seeded RNG. The timer resets to this on contact from a leader.
     pub base_timeout: u64,
 
+    /// Deliberately reintroduce the (now-fixed) match-index safety bug, for
+    /// demonstrating that the simulator catches it. When true, a follower reports
+    /// its raw log length instead of the index this RPC confirmed -- the exact
+    /// bug that let a leader commit on a false majority. Off in normal operation;
+    /// a "mutation test" of our own checker.
+    pub inject_match_index_bug: bool,
+
     // --- Candidate state ---
     votes_received: Vec<bool>,
 
@@ -115,6 +122,7 @@ impl RaftNode {
             crashed: false,
             election_timer: 0,
             base_timeout: 10,
+            inject_match_index_bug: false,
             votes_received: vec![false; n_nodes],
             next_index: vec![1; n_nodes],
             match_index: vec![0; n_nodes],
@@ -377,7 +385,14 @@ impl RaftNode {
                         // index (the seed-1111 violation this simulator caught).
                         term: self.current_term,
                         success: true,
-                        match_index: last_new_index,
+                        // Correct: report only what this RPC confirmed. The
+                        // injected bug reverts to the raw log length, which is
+                        // what the simulator is designed to catch.
+                        match_index: if self.inject_match_index_bug {
+                            self.log.len()
+                        } else {
+                            last_new_index
+                        },
                     },
                 )]
             }
