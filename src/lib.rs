@@ -11,6 +11,7 @@
 
 pub mod checker;
 pub mod kv;
+pub mod linearizability;
 pub mod net;
 pub mod raft;
 pub mod raft_runner;
