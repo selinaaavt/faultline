@@ -9,5 +9,8 @@
 //! *exactly* by replaying that seed. This is how systems like FoundationDB and
 //! TigerBeetle test correctness under partial failure.
 
+pub mod checker;
+pub mod kv;
 pub mod net;
+pub mod runner;
 pub mod sim;
